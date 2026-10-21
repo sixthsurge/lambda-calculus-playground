@@ -1,1 +1,1 @@
-lambda calculus playground
+experimenting with the lambda calculus for fun and learning :)
