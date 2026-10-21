@@ -10,3 +10,4 @@ not := \p. p F T
 and := \p. \q. p q p
 or := \p. \q. p p q
 iszero := \n. n (\x. F) T
+leq := \m. \n. iszero (sub m n)

@@ -559,7 +559,7 @@ impl Modifier {
                 }
             },
             Self::WithDict(mut term) => {
-                for (name, definition) in playground.dictionary.iter() {
+                for (name, definition) in playground.dictionary.iter().rev() {
                     term = term.with_symbol(name.clone().into(), definition.clone());
                 }
                 term
@@ -571,7 +571,7 @@ impl Modifier {
 
 #[derive(Clone, Debug, Default)]
 struct LambdaPlayground {
-    dictionary: FxHashMap<String, Term>,
+    dictionary: Vec<(String, Term)>,
     terminate: bool,
 }
 
@@ -648,7 +648,7 @@ impl LambdaPlayground {
         }
 
         if let Some(ident) = identifier {
-            self.dictionary.insert(ident.trim().to_string(), term);
+            self.dictionary.push((ident.trim().to_string(), term));
         }
 
         Ok(())
