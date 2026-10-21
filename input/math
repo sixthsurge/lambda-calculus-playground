@@ -1,13 +1,38 @@
-succ := \n. \f. \x. f (n f x)
-pred := \n. \f. \x. n (\g. \h. h (g f)) (\u. x) (\u. u)
-add := \m. \n. \f. \x. m f (n f x)
-sub := \m. \n. n pred m
-mul := \m. \n. \f. \x. m (n f x)
-pow := \base. \power. power base
-T := \x. \y. x
-F := \x. \y. y
+Y := \g. (\x. g (x x)) (\x. g (x x))
+S := \x y z. x z (y z)
+K := \x y. x
+B := \x y z. x (y z)
+C := \x y z. x z y
+W := \x y. x y y
+U := \x.x x 
+Omega := U U
+
+# Logic functions
+T := \x y. x
+F := \x y. y
 not := \p. p F T
-and := \p. \q. p q p
-or := \p. \q. p p q
+and := \p q. p q p
+or := \p q. p p q
+
+# Church numeral arithmetic functions
+succ := \n f x. f (n f x)
+pred := \n f x. n (\g. \h. h (g f)) (\u. x) (\u. u)
+add := \m n f x. m f (n f x)
+sub := \m n. n pred m
+mul := \m n. m (add n) cnum!(0)
+pow := \base power. power base
 iszero := \n. n (\x. F) T
-leq := \m. \n. iszero (sub m n)
+leq := \m n. iszero (sub m n)
+eq := \m n. and (leq m n) (leq n m)
+
+# Linked lists
+pair := \x y f. f x y
+first := \pair. pair T
+second := \pair. pair F
+nil := \f. T
+isnil := \p. p (\x y. F)
+factorial := Y (\r n. (iszero n) cnum!(1) (mul n (r (pred n))))
+foldl := Y (\self func base list. (isnil list) base (func (first list) (self func base (second list))))
+sum := foldl add cnum!(0)
+prod := foldl mul cnum!(1)
+iota := Y (\self n. (iszero n) nil (pair n (self (pred n))))

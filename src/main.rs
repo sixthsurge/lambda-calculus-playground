@@ -1,10 +1,12 @@
 #![allow(non_snake_case)]
 
+use anyhow::Context;
 use color_print::cprintln;
 use is_variant::IsVariant;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
+use rustyline::{DefaultEditor, error::ReadlineError};
 use std::{
     io::{Write, stdin},
     iter::Peekable,
@@ -265,6 +267,11 @@ impl<'source> Iterator for Lexer<'source> {
     fn next(&mut self) -> Option<Self::Item> {
         self.skip_whitespace();
 
+        // If we see a comment, stop tokenizing the line.
+        if self.eat_char('#') {
+            return None;
+        }
+
         // Char tokens
         for (c, token) in [
             ('\\', Token::Lambda),
@@ -354,25 +361,39 @@ impl<'tokens, 'playground> Parser<'tokens, 'playground> {
     }
 
     fn parse_abstraction(mut parser: Self) -> Result<(Self, Term), ParseErr> {
+        // We support the shorthand \x y z. insteaad of \x.\y.\z.
+
         // Lambda.
         parser.expect(&Token::Lambda)?;
 
         // Argument.
-        let arg = match parser.peek().cloned() {
+        let mut args = vec![match parser.peek().cloned() {
             Ok(Token::Name(name)) => {
                 parser.next()?;
                 Ok(name.clone())
             }
             _ => Err(ParseErr::ExpectedSpecificToken(Token::Name(Name::from("")))),
-        }?;
+        }?];
 
-        // Dot.
+        // moar args
+        loop {
+            let Ok(Token::Name(name)) = parser.peek().cloned() else {
+                break;
+            };
+            parser.next()?;
+            args.push(name);
+        }
+
         parser.expect(&Token::Dot)?;
 
-        // Body.
         let (parser, body) = Self::parse_term(parser.clone())?;
 
-        Ok((parser, Term::Abstraction(arg, Box::new(body))))
+        let mut term = body;
+        for arg in args.into_iter().rev() {
+            term = Term::Abstraction(arg, Box::new(term));
+        }
+
+        Ok((parser, term))
     }
 
     fn parse_application(parser: Self) -> Result<(Self, Term), ParseErr> {
@@ -484,13 +505,16 @@ struct ParsedModifier {
 }
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {}
+struct Args {
+    #[arg(long, default_value_t = false)]
+    print_intermediate: bool,
+}
 
 #[derive(Clone, Debug)]
 enum Modifier {
     Subst(Name, Term, Term),
     BetaReduce(Term),
-    NormalOrderReduce(Term),
+    NormalOrderReduce(Term, bool),
     WithDict(Term),
     ChurchNumeral(num_bigint::BigUint),
 }
@@ -522,6 +546,7 @@ impl Modifier {
                 } else {
                     Some(Self::NormalOrderReduce(
                         parsed.args.into_iter().next().unwrap(),
+                        false,
                     ))
                 }
             }
@@ -553,7 +578,10 @@ impl Modifier {
                 term.beta_reduce();
                 term
             }
-            Self::NormalOrderReduce(mut term) => loop {
+            Self::NormalOrderReduce(mut term, print_intermediate) => loop {
+                if print_intermediate {
+                    println!("{}", term);
+                }
                 if !term.beta_reduce() {
                     break term;
                 }
@@ -569,29 +597,54 @@ impl Modifier {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 struct LambdaPlayground {
+    args: Args,
     dictionary: Vec<(String, Term)>,
     terminate: bool,
 }
 
 impl LambdaPlayground {
+    fn new(args: Args) -> Self {
+        Self {
+            args,
+            dictionary: vec![],
+            terminate: false,
+        }
+    }
+
     fn run_repl(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let stdin = stdin();
-        let mut line_buf = String::new();
+        const HISTORY_PATH: &'static str = ".lambda-history";
+
+        let mut rl = DefaultEditor::new()?;
+        rl.load_history(HISTORY_PATH).ok();
 
         while !self.terminate {
-            line_buf.clear();
-            print!("> ");
-            std::io::stdout().flush()?;
-
-            let Ok(n) = stdin.read_line(&mut line_buf) else {
-                break;
+            let line = match rl.readline("λ: ") {
+                Ok(line) => {
+                    rl.add_history_entry(line.as_str())?;
+                    line
+                }
+                Err(ReadlineError::Interrupted) => {
+                    println!("^C");
+                    break;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("^D");
+                    break;
+                }
+                Err(err) => {
+                    println!("<red>error</>: {:?}", err);
+                    break;
+                }
             };
-            if let Err(e) = self.process_line(&line_buf[..n], true) {
-                cprintln!("<red>error</>: {e}");
+
+            if let Err(e) = self.process_line(&line, true) {
+                cprintln!("<red>error</>: {e:#}");
             }
         }
+
+        rl.save_history(HISTORY_PATH)?;
 
         Ok(())
     }
@@ -634,12 +687,18 @@ impl LambdaPlayground {
             remaining = after.trim();
         }
 
-        let term = Parser::parse_term(Parser::new(&Lexer::new(remaining).collect_vec(), self))?.1;
+        let tokens = Lexer::new(remaining).collect_vec();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let term = Parser::parse_term(Parser::new(&tokens, self))?.1;
+        log::trace!("Parsed {term:?}");
 
         if interactive {
             // Print expanded and reduced term
             let expanded = Modifier::WithDict(term.clone()).apply(self);
-            let reduced = Modifier::NormalOrderReduce(expanded).apply(self);
+            let reduced =
+                Modifier::NormalOrderReduce(expanded, self.args.print_intermediate).apply(self);
             println!("{}", reduced);
 
             if let Some(val) = reduced.value_from_cnum() {
@@ -655,14 +714,15 @@ impl LambdaPlayground {
     }
 
     fn process_string(&mut self, string: &str) -> anyhow::Result<()> {
-        for line in string.lines() {
+        for (index, line) in string.lines().enumerate() {
             if self.terminate {
                 break;
             }
             if line.trim().is_empty() {
                 continue;
             }
-            self.process_line(line, false)?;
+            self.process_line(line, false)
+                .with_context(|| format!("on line {}", index + 1))?;
         }
         Ok(())
     }
@@ -687,7 +747,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = <Args as clap::Parser>::parse();
 
-    LambdaPlayground::default().run_repl()?;
+    LambdaPlayground::new(args).run_repl()?;
 
     Ok(())
 }
