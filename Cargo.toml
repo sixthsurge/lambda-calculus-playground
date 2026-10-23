@@ -9,7 +9,6 @@ clap = { version = "4.6.7", features = ["derive"] }
 color-print = "0.3.7"
 enum-assoc = "1.4.1"
 env_logger = "0.11.11"
-is_variant = "1.0.0"
 itertools = "0.15.0"
 log = "0.4.34"
 num-bigint = "0.5.1"

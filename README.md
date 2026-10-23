@@ -20,3 +20,7 @@ no LLMs were used for this project (for research or programming).
   with a `!`. The most useful one is `!load` which loads definitions from a file, for example 
   `!load input/math`
 
+### references
+- https://en.wikipedia.org/wiki/Lambda_calculus
+- http://pl.postech.ac.kr/~gla/pl2007/notes/deBruijn.pdf
+- https://tromp.github.io/cl/diagrams.html
