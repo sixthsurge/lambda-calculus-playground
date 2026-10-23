@@ -12,7 +12,7 @@ no LLMs were used for this project (for research or programming).
 - you can add symbols to the dictionary by writing `name := definition` where the definition is a lambda
   term. before each term is reduced, all `(symbol_name, symbol_definition)` pairs in the dictionary are added to it by
   repeatedly surrounding the term in `(\symbol_name. term) symbol_definition`
-- additionally I have a concept of "modifiers" which are written a bit like Rust macros (`name!(arg1 arg2 ...)`)
+- additionally I have a concept of "modifiers" which are written a bit like Rust macros (`name!(arg1, arg2 ...)`)
   - these are intended as helpers which transform the term as it is parsed
   - the most useful of these is cnum! which creates a Church numeral, for example `cnum!(4) => \f
     x. f (f (f (f x)))`

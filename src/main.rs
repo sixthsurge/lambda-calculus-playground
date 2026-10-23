@@ -4,35 +4,81 @@ mod reduction;
 mod term_parsing;
 mod term_representation;
 mod tromp_diagram;
+mod type_system;
+
+use std::{fmt::Display, str::FromStr};
 
 use anyhow::Context;
 use color_print::cprintln;
+use enum_assoc::Assoc;
 use itertools::Itertools;
 use rustyline::{error::ReadlineError, DefaultEditor};
+use thiserror::Error;
 
 use crate::{
-    reduction::normal_order_reduction_iter,
-    term_parsing::{parse_term, ParseErr},
+    reduction::{normal_order_reduction, normal_order_reduction_iter},
+    term_parsing::{parse_term, ParseError},
     term_representation::{CanonicalTerm, Name, TermRepresentation},
+    type_system::{IsTypeSystem, SimplyTypedLambdaCalculus, TypingContext, UntypedLambdaCalculus},
 };
+
+#[derive(Clone, Copy, Debug, Assoc, PartialEq, Eq)]
+#[func(
+    fn name(&self) -> &'static str,
+    fn from_name(name: &str) -> Option<Self>,
+)]
+enum Mode {
+    #[assoc(name = "untyped")]
+    Untyped,
+    #[assoc(name = "stlc")]
+    SimplyTyped,
+}
+
+#[derive(Clone, Debug, Error)]
+#[error("unknown mode")]
+struct ModeErr;
+
+impl FromStr for Mode {
+    type Err = ModeErr;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_name(s).ok_or(ModeErr)
+    }
+}
+
+impl Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
 
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    #[arg(long, default_value_t = Mode::Untyped)]
+    mode: Mode,
     #[arg(long, default_value_t = false)]
     print_intermediate: bool,
 }
 
 #[derive(Debug)]
-struct LambdaPlayground {
-    dictionary: Vec<(String, CanonicalTerm)>,
+struct LambdaPlayground<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
+    mode: Mode,
+    dictionary: Vec<(String, CanonicalTerm<TypeSystem>)>,
     terminate: bool,
     print_intermediate: bool,
 }
 
-impl LambdaPlayground {
-    fn new(print_intermediate: bool) -> Self {
+impl<TypeSystem> LambdaPlayground<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
+    fn new(mode: Mode, print_intermediate: bool) -> Self {
         Self {
+            mode,
             dictionary: vec![],
             terminate: false,
             print_intermediate,
@@ -98,6 +144,7 @@ impl LambdaPlayground {
                     println!("  !q           | exit the REPL");
                     println!("  !load <path> | source definitions from a file");
                     println!("  !dict        | print all definitions");
+                    println!("  !req <mode>  | require a specific mode (untyped, stlc, etc)");
                 }
                 Some("load") => {
                     let Some(path) = words.get(1) else {
@@ -115,6 +162,21 @@ impl LambdaPlayground {
                 Some("dict") => {
                     for (name, definition) in &self.dictionary {
                         println!("{} = {}", name, definition);
+                    }
+                }
+                Some("req") => {
+                    let mode: Mode = words
+                        .get(1)
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("expected argument after 'req'"))?
+                        .parse()?;
+                    if mode != self.mode {
+                        self.terminate = true;
+                        return Err(anyhow::anyhow!(
+                            "required mode '{}' does not match current mode '{}'",
+                            mode,
+                            self.mode
+                        ));
                     }
                 }
                 Some(a) => {
@@ -136,7 +198,7 @@ impl LambdaPlayground {
 
         let term = match parse_term(remaining) {
             Ok(t) => t,
-            Err(ParseErr::NoTokens) => {
+            Err(ParseError::NoTokens) => {
                 // Allow empty lines.
                 return Ok(());
             }
@@ -161,6 +223,14 @@ impl LambdaPlayground {
                 }
             }
             */
+
+            match TypeSystem::typecheck(&term, &TypingContext::<TypeSystem>::new()) {
+                Ok(ty) => cprintln!("Type: <yellow>{ty}</>"),
+                Err(e) => {
+                    cprintln!("<red>Type error</>: {e}");
+                    anyhow::bail!("type error");
+                }
+            }
 
             let mut reduced = expanded.clone();
             loop {
@@ -200,6 +270,14 @@ impl LambdaPlayground {
         }
         Ok(())
     }
+
+    fn process(&self, mut term: CanonicalTerm<TypeSystem>) -> CanonicalTerm<TypeSystem> {
+        for (name, definition) in self.dictionary.iter().rev() {
+            term.substitute(&Name::from(name.as_str()), definition);
+        }
+        normal_order_reduction(&mut term);
+        term
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -223,7 +301,87 @@ fn main() -> anyhow::Result<()> {
 
     let args = <Args as clap::Parser>::parse();
 
-    LambdaPlayground::new(args.print_intermediate).run_repl()?;
+    match args.mode {
+        Mode::Untyped => {
+            LambdaPlayground::<UntypedLambdaCalculus>::new(args.mode, args.print_intermediate)
+                .run_repl()?;
+        }
+        Mode::SimplyTyped => {
+            LambdaPlayground::<SimplyTypedLambdaCalculus>::new(args.mode, args.print_intermediate)
+                .run_repl()?;
+        }
+    }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigUint;
+
+    use super::*;
+
+    #[test]
+    fn church_numeral_arithmetic() {
+        let mut playground = LambdaPlayground::<UntypedLambdaCalculus>::new(Mode::Untyped, false);
+
+        playground
+            .process_string(
+                r#"
+                succ := \n f x. f (n f x)
+                pred := \n f x. n (\g. \h. h (g f)) (\u. x) (\u. u)
+                add := \m n f x. m f (n f x)
+                sub := \m n. n pred m
+                mul := \m n. m (add n) cnum!(0)
+                pow := \base power. power base
+                iszero := \n. n (\x. F) T
+                leq := \m n. iszero (sub m n)
+                eq := \m n. and (leq m n) (leq n m)
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            playground
+                .process("succ cnum!(4)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(5u32))
+        );
+        assert_eq!(
+            playground
+                .process("pred cnum!(4)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(3u32))
+        );
+        assert_eq!(
+            playground
+                .process("mul cnum!(3) cnum!(4)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(12u32))
+        );
+        assert_eq!(
+            playground
+                .process("add cnum!(3) cnum!(4)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(7u32))
+        );
+        assert_eq!(
+            playground
+                .process("sub cnum!(3) cnum!(4)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(0u32))
+        );
+        assert_eq!(
+            playground
+                .process("sub cnum!(4) cnum!(3)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(1u32))
+        );
+        assert_eq!(
+            playground
+                .process("mul cnum!(3) cnum!(4)".parse().unwrap())
+                .church_numeral_value(),
+            Some(BigUint::from(12u32))
+        );
+    }
 }

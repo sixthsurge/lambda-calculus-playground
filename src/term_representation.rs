@@ -1,36 +1,76 @@
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use num_bigint::BigUint;
 use rustc_hash::FxHashSet;
 
+use crate::{
+    term_parsing::{ParseError, parse_term},
+    type_system::{IsTypeSystem, UntypedLambdaCalculus},
+};
+
 /// Interface for different representations of lambda terms on which reduction can be performed.
-pub trait TermRepresentation : From<CanonicalTerm> + Into<CanonicalTerm> + Clone {
+pub trait TermRepresentation<TypeSystem>:
+    From<CanonicalTerm<TypeSystem>> + Into<CanonicalTerm<TypeSystem>> + Clone
+where
+    TypeSystem: IsTypeSystem,
+{
     type VariableId: Clone + Eq + PartialEq + std::hash::Hash;
+
+    fn make_constant(c: TypeSystem::Constant) -> Self;
 
     /// Capture-avoiding substitution `self <- {N/x} self`.
     fn substitute(&mut self, x: &Self::VariableId, N: &Self);
 
-    fn as_abstraction(&self) -> Option<(&Self::VariableId, &Self)>;
+    fn get_name(&self, id: &Self::VariableId) -> Name;
+
+    fn as_abstraction(&self) -> Option<(&Self::VariableId, &Self, Option<&TypeSystem::Type>)>;
+    fn as_constant(&self) -> Option<&TypeSystem::Constant>;
     fn as_application(&self) -> Option<(&Self, &Self)>;
     fn as_variable(&self) -> Option<&Self::VariableId>;
-    fn as_abstraction_mut(&mut self) -> Option<(&mut Self::VariableId, &mut Self)>;
+    fn as_abstraction_mut(
+        &mut self,
+    ) -> Option<(
+        &mut Self::VariableId,
+        &mut Self,
+        Option<&mut TypeSystem::Type>,
+    )>;
     fn as_application_mut(&mut self) -> Option<(&mut Self, &mut Self)>;
     fn as_variable_mut(&mut self) -> Option<&mut Self::VariableId>;
 
-    fn is_abstraction(&self) -> bool { self.as_abstraction().is_some() }
-    fn is_application(&self) -> bool { self.as_application().is_some() }
-    fn is_variable(&self) -> bool { self.as_variable().is_some() }
+    fn is_abstraction(&self) -> bool {
+        self.as_abstraction().is_some()
+    }
+    fn is_application(&self) -> bool {
+        self.as_application().is_some()
+    }
+    fn is_variable(&self) -> bool {
+        self.as_variable().is_some()
+    }
 }
 
 /// Canonical representation of lambda terms using named variables.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CanonicalTerm {
+pub enum CanonicalTerm<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
     Variable(Name),
-    Abstraction(Name, Box<CanonicalTerm>),
-    Application(Box<CanonicalTerm>, Box<CanonicalTerm>),
+    Constant(TypeSystem::Constant),
+    Abstraction(
+        Name,
+        Box<CanonicalTerm<TypeSystem>>,
+        Option<TypeSystem::Type>,
+    ),
+    Application(
+        Box<CanonicalTerm<TypeSystem>>,
+        Box<CanonicalTerm<TypeSystem>>,
+    ),
 }
 
-impl CanonicalTerm {
+impl<TypeSystem> CanonicalTerm<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
     pub fn create_church_numeral(value: BigUint) -> Self {
         let f: Name = "f".into();
         let x: Name = "x".into();
@@ -38,12 +78,15 @@ impl CanonicalTerm {
 
         let mut counter = BigUint::ZERO;
         while counter < value {
-            term = CanonicalTerm::Application(Box::new(CanonicalTerm::Variable(f.clone())), Box::new(term));
+            term = CanonicalTerm::Application(
+                Box::new(CanonicalTerm::Variable(f.clone())),
+                Box::new(term),
+            );
             counter += BigUint::ONE;
         }
 
-        term = CanonicalTerm::Abstraction(x, Box::new(term));
-        term = CanonicalTerm::Abstraction(f, Box::new(term));
+        term = CanonicalTerm::Abstraction(x, Box::new(term), None);
+        term = CanonicalTerm::Abstraction(f, Box::new(term), None);
 
         term
     }
@@ -51,7 +94,8 @@ impl CanonicalTerm {
     pub fn free_variables(&self) -> FxHashSet<Name> {
         match self {
             Self::Variable(name) => std::iter::once(name).cloned().collect(),
-            Self::Abstraction(name, body) => {
+            Self::Constant(_) => Default::default(),
+            Self::Abstraction(name, body, _) => {
                 let mut s = body.free_variables();
                 s.remove(name);
                 s
@@ -65,10 +109,10 @@ impl CanonicalTerm {
     }
 
     pub fn church_numeral_value(&self) -> Option<BigUint> {
-        let CanonicalTerm::Abstraction(f, rest) = self else {
+        let CanonicalTerm::Abstraction(f, rest, _) = self else {
             return None;
         };
-        let CanonicalTerm::Abstraction(x, rest) = rest.as_ref() else {
+        let CanonicalTerm::Abstraction(x, rest, _) = rest.as_ref() else {
             return None;
         };
         let mut rest = rest.as_ref();
@@ -97,8 +141,19 @@ impl CanonicalTerm {
     }
 }
 
-impl TermRepresentation for CanonicalTerm {
+impl<TypeSystem> TermRepresentation<TypeSystem> for CanonicalTerm<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
     type VariableId = Name;
+
+    fn make_constant(c: TypeSystem::Constant) -> Self {
+        Self::Constant(c)
+    }
+
+    fn get_name(&self, id: &Self::VariableId) -> Name {
+        id.clone()
+    }
 
     fn substitute(&mut self, x: &Self::VariableId, N: &Self) {
         match self {
@@ -107,7 +162,8 @@ impl TermRepresentation for CanonicalTerm {
                     *self = N.clone();
                 }
             }
-            Self::Abstraction(y, M) => {
+            Self::Constant(_) => {}
+            Self::Abstraction(y, M, _) => {
                 if y == x {
                     *y = x.clone();
                 } else {
@@ -131,13 +187,20 @@ impl TermRepresentation for CanonicalTerm {
             Self::Application(m1, m2) => {
                 m1.substitute(x, N);
                 m2.substitute(x, N);
-            },
-        }   
+            }
+        }
     }
 
-    fn as_abstraction(&self) -> Option<(&Self::VariableId, &Self)> {
+    fn as_abstraction(&self) -> Option<(&Self::VariableId, &Self, Option<&TypeSystem::Type>)> {
         match self {
-            Self::Abstraction(arg, body)  => Some((arg, body.as_ref())),
+            Self::Abstraction(arg, body, ty) => Some((arg, body.as_ref(), ty.as_ref())),
+            _ => None,
+        }
+    }
+
+    fn as_constant(&self) -> Option<&TypeSystem::Constant> {
+        match self {
+            Self::Constant(x) => Some(x),
             _ => None,
         }
     }
@@ -156,9 +219,15 @@ impl TermRepresentation for CanonicalTerm {
         }
     }
 
-    fn as_abstraction_mut(&mut self) -> Option<(&mut Self::VariableId, &mut Self)> {
+    fn as_abstraction_mut(
+        &mut self,
+    ) -> Option<(
+        &mut Self::VariableId,
+        &mut Self,
+        Option<&mut TypeSystem::Type>,
+    )> {
         match self {
-            Self::Abstraction(arg, body)  => Some((arg, body.as_mut())),
+            Self::Abstraction(arg, body, ty) => Some((arg, body.as_mut(), ty.as_mut())),
             _ => None,
         }
     }
@@ -167,7 +236,7 @@ impl TermRepresentation for CanonicalTerm {
         match self {
             Self::Application(m, n) => Some((m.as_mut(), n.as_mut())),
             _ => None,
-        }   
+        }
     }
 
     fn as_variable_mut(&mut self) -> Option<&mut Self::VariableId> {
@@ -178,16 +247,38 @@ impl TermRepresentation for CanonicalTerm {
     }
 }
 
-impl std::fmt::Display for CanonicalTerm {
+impl<TypeSystem> FromStr for CanonicalTerm<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_term(s)
+    }
+}
+
+impl<TypeSystem> std::fmt::Display for CanonicalTerm<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Variable(name) => f.write_str(name.as_str()),
-            Self::Abstraction(arg, body) => write!(f, "λ{}.{}", arg.as_str(), &body),
+            Self::Variable(name) => write!(f, "{name}"),
+            Self::Constant(x) => write!(f, "{x}"),
+            Self::Abstraction(arg, body, ty) => {
+                if let Some(ty) = ty {
+                    write!(f, "λ{}: {}.{}", arg.as_str(), ty, &body)
+                } else {
+                    write!(f, "λ{}.{}", arg.as_str(), &body)
+                }
+            }
             Self::Application(a, b) => write!(f, "({} {})", &a, &b),
         }
     }
 }
 
+/*
 /// Variables are identified by De-Bruijn index.
 /// Free variables are eliminated prior to conversion by inserting new bindings. (e.g. `a` => `\a. a` => \0)
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,7 +301,11 @@ impl Into<CanonicalTerm> for DeBruijnIndexedTerm {
 }
 
 impl DeBruijnIndexedTerm {
-    pub fn from_canonical(term: &CanonicalTerm, binding_depth: i64, bound_variables: &mut Vec<(Name, i64)>) -> Self {
+    pub fn from_canonical(
+        term: &CanonicalTerm,
+        binding_depth: i64,
+        bound_variables: &mut Vec<(Name, i64)>,
+    ) -> Self {
         match term {
             CanonicalTerm::Variable(name) => Self::Variable(
                 binding_depth
@@ -236,6 +331,8 @@ impl DeBruijnIndexedTerm {
             ),
         }
     }
+
+    WIP
 
     fn substitute(&mut self, n: i64, N: &Self) {
         // http://pl.postech.ac.kr/~gla/pl2007/notes/deBruijn.pdf
@@ -286,6 +383,7 @@ impl std::fmt::Display for DeBruijnIndexedTerm {
         }
     }
 }
+*/
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Name {
@@ -331,10 +429,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cnum_conversion() {
+    fn church_numeral_conversion() {
         // Church numeral <-> int.
         for x in [0 as u32, 1, 42].into_iter() {
-            assert_eq!(Some(x.into()), CanonicalTerm::create_church_numeral(x.into()).church_numeral_value());
+            assert_eq!(
+                Some(x.into()),
+                CanonicalTerm::<UntypedLambdaCalculus>::create_church_numeral(x.into())
+                    .church_numeral_value()
+            );
         }
     }
 }

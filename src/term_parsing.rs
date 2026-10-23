@@ -1,13 +1,21 @@
-use std::{iter::Peekable, str::Chars};
+use std::str::Chars;
 
-use color_print::cprintln;
-use itertools::Itertools;
+use itertools::{Itertools, PeekNth, peek_nth};
 use thiserror::Error;
 
-use crate::{reduction::{beta_reduce, normal_order_reduction}, term_representation::{CanonicalTerm, Name, TermRepresentation}};
+use crate::{
+    reduction::{beta_reduce, normal_order_reduction},
+    term_representation::{CanonicalTerm, Name, TermRepresentation},
+    type_system::IsTypeSystem,
+};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum ParseErr {
+pub enum ParseError {
+    /// Error returned when attempting to parse something that doesn't exist, for
+    /// example a constant in the untyped lambda calculus.
+    #[error("doesn't exist")]
+    DoesntExist,
+    /// Error returned when the input token stream is empty.
     #[error("no tokens")]
     NoTokens,
     #[error("unexpected eof")]
@@ -15,39 +23,47 @@ pub enum ParseErr {
     #[error("expected {0:?}, got {1:?}")]
     ExpectedSpecificToken(Token, Option<Token>),
     #[error("any of: {0:?}")]
-    Any(Vec<ParseErr>),
-    #[error("bad modifier: {0:?}")]
-    BadModifier(ParsedModifier),
+    Any(Vec<ParseError>),
+    #[error("bad modifier")]
+    BadModifier,
+    #[error("{0}")]
+    Other(String),
 }
 
-pub fn parse_term(source: &str) -> Result<CanonicalTerm, ParseErr> {
+pub fn parse_term<TypeSystem: IsTypeSystem>(
+    source: &str,
+) -> Result<CanonicalTerm<TypeSystem>, ParseError> {
     let tokens = Lexer::new(source).collect_vec();
+    log::trace!("Tokens: {tokens:?}");
     if tokens.is_empty() {
-        Err(ParseErr::NoTokens)
+        Err(ParseError::NoTokens)
     } else {
         parse_term_root(Parser::new(&tokens)).map(|(_, term)| term)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Token {
+pub enum Token {
     Unknown(char),
     Name(Name),
     Lambda,
     Dot,
     OpenParen,
     CloseParen,
+    Colon,
+    Arrow,
     Bang,
+    Comma,
 }
 
 struct Lexer<'source> {
-    chars: Peekable<Chars<'source>>,
+    chars: PeekNth<Chars<'source>>,
 }
 
 impl<'source> Lexer<'source> {
     fn new(source: &'source str) -> Self {
         Self {
-            chars: source.chars().peekable(),
+            chars: peek_nth(source.chars()),
         }
     }
 
@@ -58,6 +74,18 @@ impl<'source> Lexer<'source> {
         } else {
             false
         }
+    }
+
+    fn eat_str(&mut self, s: &str) -> bool {
+        for (i, c) in s.chars().enumerate() {
+            if self.chars.peek_nth(i).copied() != Some(c) {
+                return false;
+            }
+        }
+        for _ in 0..s.len() {
+            self.chars.next();
+        }
+        true
     }
 
     // word = [a-zA-Z0-9]*
@@ -76,7 +104,7 @@ impl<'source> Lexer<'source> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.chars.peek().is_some_and(|c| c.is_whitespace()) {
+        while self.chars.peek().is_some_and(|&c| c.is_whitespace() || c == '_') {
             self.chars.next();
         }
     }
@@ -93,18 +121,21 @@ impl<'source> Iterator for Lexer<'source> {
             return None;
         }
 
-        // Char tokens.
-        for (c, token) in [
-            ('λ', Token::Lambda),
-            ('\\', Token::Lambda),
-            ('.', Token::Dot),
-            ('(', Token::OpenParen),
-            (')', Token::CloseParen),
-            ('!', Token::Bang),
+        // Simple tokens.
+        for (s, token) in [
+            ("->", Token::Arrow),
+            ("λ", Token::Lambda),
+            ("\\", Token::Lambda),
+            (".", Token::Dot),
+            ("(", Token::OpenParen),
+            (")", Token::CloseParen),
+            (":", Token::Colon),
+            ("!", Token::Bang),
+            (",", Token::Comma),
         ]
         .into_iter()
         {
-            if self.eat_char(c) {
+            if self.eat_str(s) {
                 return Some(token.clone());
             }
         }
@@ -119,29 +150,29 @@ impl<'source> Iterator for Lexer<'source> {
 }
 
 #[derive(Clone, Debug)]
-struct Parser<'tokens> {
+pub struct Parser<'tokens> {
     tokens: &'tokens [Token],
 }
 
 impl<'tokens> Parser<'tokens> {
-    fn new(tokens: &'tokens [Token]) -> Self {
+    pub fn new(tokens: &'tokens [Token]) -> Self {
         Self { tokens }
     }
 
-    fn peek(&mut self) -> Result<&Token, ParseErr> {
-        self.tokens.get(0).ok_or(ParseErr::UnexpectedEof)
+    pub fn peek(&mut self) -> Result<&Token, ParseError> {
+        self.tokens.get(0).ok_or(ParseError::UnexpectedEof)
     }
 
-    fn next(&mut self) -> Result<(), ParseErr> {
+    pub fn next(&mut self) -> Result<(), ParseError> {
         if self.tokens.is_empty() {
-            Err(ParseErr::UnexpectedEof)
+            Err(ParseError::UnexpectedEof)
         } else {
             self.tokens = &self.tokens[1..];
             Ok(())
         }
     }
 
-    fn accept(&mut self, token: &Token) -> bool {
+    pub fn accept(&mut self, token: &Token) -> bool {
         if self.peek().is_ok_and(|t| t == token) {
             self.next()
                 .expect("as peek() == token we should not be at the eof");
@@ -151,11 +182,11 @@ impl<'tokens> Parser<'tokens> {
         }
     }
 
-    fn expect(&mut self, token: &Token) -> Result<(), ParseErr> {
+    pub fn expect(&mut self, token: &Token) -> Result<(), ParseError> {
         if self.accept(token) {
             Ok(())
         } else {
-            Err(ParseErr::ExpectedSpecificToken(
+            Err(ParseError::ExpectedSpecificToken(
                 token.clone(),
                 self.peek().ok().cloned(),
             ))
@@ -163,43 +194,77 @@ impl<'tokens> Parser<'tokens> {
     }
 }
 
-fn parse_variable(mut parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
+fn parse_variable<TypeSystem>(
+    mut parser: Parser,
+) -> Result<(Parser, CanonicalTerm<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     match parser.peek().cloned() {
         Ok(Token::Name(name)) => {
             parser.next()?;
             Ok((parser.clone(), CanonicalTerm::Variable(name.clone())))
         }
-        _ => Err(ParseErr::ExpectedSpecificToken(
+        _ => Err(ParseError::ExpectedSpecificToken(
             Token::Name(Name::from("")),
             parser.peek().ok().cloned(),
         )),
     }
 }
-fn parse_abstraction(mut parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
+
+fn parse_arg<TypeSystem>(
+    mut parser: Parser,
+) -> Result<(Parser, (Name, Option<TypeSystem::Type>)), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
+    let name = match parser.peek().cloned() {
+        Ok(Token::Name(name)) => {
+            parser.next()?;
+            Ok(name.clone())
+        }
+        _ => Err(ParseError::ExpectedSpecificToken(
+            Token::Name(Name::from("")),
+            parser.peek().ok().cloned(),
+        )),
+    }?;
+
+    let ty = if parser.accept(&Token::Colon) {
+        let (new_parser, ty) = TypeSystem::Type::parse(parser)?;
+        parser = new_parser;
+        Some(ty)
+    } else {
+        None
+    };
+
+    Ok((parser, (name, ty)))
+}
+
+fn parse_abstraction<TypeSystem>(
+    mut parser: Parser,
+) -> Result<(Parser, CanonicalTerm<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     // We support the shorthand \x y z. insteaad of \x.\y.\z.
 
     // Lambda.
     parser.expect(&Token::Lambda)?;
 
     // Argument.
-    let mut args = vec![match parser.peek().cloned() {
-        Ok(Token::Name(name)) => {
-            parser.next()?;
-            Ok(name.clone())
-        }
-        _ => Err(ParseErr::ExpectedSpecificToken(
-            Token::Name(Name::from("")),
-            parser.peek().ok().cloned(),
-        )),
-    }?];
+    let (new_parser, arg) = parse_arg::<TypeSystem>(parser)?;
+    parser = new_parser;
+    let mut args = vec![arg];
 
     // moar args
     loop {
-        let Ok(Token::Name(name)) = parser.peek().cloned() else {
+        let Ok(Token::Name(_)) = parser.peek().cloned() else {
             break;
         };
-        parser.next()?;
-        args.push(name);
+
+        let (new_parser, arg) = parse_arg::<TypeSystem>(parser)?;
+        parser = new_parser;
+        args.push(arg);
     }
 
     parser.expect(&Token::Dot)?;
@@ -207,22 +272,31 @@ fn parse_abstraction(mut parser: Parser) -> Result<(Parser, CanonicalTerm), Pars
     let (parser, body) = parse_term_root(parser.clone())?;
 
     let mut term = body;
-    for arg in args.into_iter().rev() {
-        term = CanonicalTerm::Abstraction(arg, Box::new(term));
+    for (name, ty) in args.into_iter().rev() {
+        term = CanonicalTerm::Abstraction(name, Box::new(term), ty);
     }
 
     Ok((parser, term))
 }
 
-fn parse_application(parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
+fn parse_application<TypeSystem>(
+    parser: Parser,
+) -> Result<(Parser, CanonicalTerm<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     // Applications are left associative by convention.
     // As the parser is LL, handling applications by recursion
     // leads to infinite left recursion. So we find all atoms
     // using a loop and then construct the left associative parse tree.
     let (mut parser, mut term) = parse_atom(parser)?;
-    while ![Ok(Token::CloseParen), Err(ParseErr::UnexpectedEof)]
-        .into_iter()
-        .contains(&parser.peek().cloned())
+    while ![
+        Ok(Token::CloseParen),
+        Ok(Token::Comma),
+        Err(ParseError::UnexpectedEof),
+    ]
+    .into_iter()
+    .contains(&parser.peek().cloned())
     {
         let (new_parser, new_term) = parse_atom(parser.clone())?;
         parser = new_parser;
@@ -232,13 +306,18 @@ fn parse_application(parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr
     Ok((parser, term))
 }
 
-fn parse_modifier(mut parser: Parser) -> Result<(Parser, ParsedModifier), ParseErr> {
+fn parse_modifier<TypeSystem>(
+    mut parser: Parser,
+) -> Result<(Parser, ParsedModifier<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     let name = match parser.peek().cloned() {
         Ok(Token::Name(name)) => {
             parser.next()?;
             Ok(name.clone())
         }
-        _ => Err(ParseErr::ExpectedSpecificToken(
+        _ => Err(ParseError::ExpectedSpecificToken(
             Token::Name(Name::from("")),
             parser.peek().ok().cloned(),
         )),
@@ -250,6 +329,10 @@ fn parse_modifier(mut parser: Parser) -> Result<(Parser, ParsedModifier), ParseE
 
     let mut args = vec![];
     while !parser.accept(&Token::CloseParen) {
+        if !args.is_empty() {
+            parser.expect(&Token::Comma)?;
+        }
+
         let (new_parser, term) = parse_term_root(parser)?;
         args.push(term);
         parser = new_parser;
@@ -258,20 +341,28 @@ fn parse_modifier(mut parser: Parser) -> Result<(Parser, ParsedModifier), ParseE
     Ok((parser, ParsedModifier { name, args }))
 }
 
-fn parse_parenthesised_term(mut parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
+fn parse_parenthesised_term<TypeSystem>(
+    mut parser: Parser,
+) -> Result<(Parser, CanonicalTerm<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     parser.expect(&Token::OpenParen)?;
     let (mut parser, term) = parse_term_root(parser.clone())?;
     parser.expect(&Token::CloseParen)?;
     return Ok((parser, term));
 }
 
-fn parse_atom(parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
+fn parse_atom<TypeSystem>(parser: Parser) -> Result<(Parser, CanonicalTerm<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     let mut errors = Vec::new();
 
     match parse_modifier(parser.clone()) {
         Ok((parser, parsed_modifier)) => {
             let term = Modifier::from_parsed(parsed_modifier.clone())
-                .ok_or(ParseErr::BadModifier(parsed_modifier))?
+                .ok_or(ParseError::BadModifier)?
                 .apply();
             return Ok((parser, term));
         }
@@ -283,15 +374,25 @@ fn parse_atom(parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
         Err(e) => errors.push(e),
     }
 
+    match TypeSystem::Constant::parse(parser.clone()) {
+        Ok((parser, c)) => return Ok((parser, CanonicalTerm::Constant(c))),
+        Err(e) => errors.push(e),
+    }
+
     match parse_variable(parser.clone()) {
         Ok(result) => return Ok(result),
         Err(e) => errors.push(e),
     }
 
-    Err(ParseErr::Any(errors))
+    Err(ParseError::Any(errors))
 }
 
-fn parse_abstractive_term(parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
+fn parse_term_root<TypeSystem>(
+    parser: Parser,
+) -> Result<(Parser, CanonicalTerm<TypeSystem>), ParseError>
+where
+    TypeSystem: IsTypeSystem,
+{
     let mut errors = Vec::new();
 
     match parse_abstraction(parser.clone()) {
@@ -304,36 +405,34 @@ fn parse_abstractive_term(parser: Parser) -> Result<(Parser, CanonicalTerm), Par
         Err(e) => errors.push(e),
     }
 
-    Err(ParseErr::Any(errors))
-}
-
-fn parse_term_root(parser: Parser) -> Result<(Parser, CanonicalTerm), ParseErr> {
-    let mut errors = Vec::new();
-
-    match parse_abstractive_term(parser.clone()) {
-        Ok(result) => return Ok(result),
-        Err(e) => errors.push(e),
-    }
-
-    Err(ParseErr::Any(errors))
+    Err(ParseError::Any(errors))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ParsedModifier {
+pub struct ParsedModifier<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
     name: Name,
-    args: Vec<CanonicalTerm>,
+    args: Vec<CanonicalTerm<TypeSystem>>,
 }
 
 #[derive(Clone, Debug)]
-enum Modifier {
-    Subst(Name, CanonicalTerm, CanonicalTerm),
-    BetaReduce(CanonicalTerm),
-    NormalOrderReduce(CanonicalTerm),
+enum Modifier<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
+    Subst(Name, CanonicalTerm<TypeSystem>, CanonicalTerm<TypeSystem>),
+    BetaReduce(CanonicalTerm<TypeSystem>),
+    NormalOrderReduce(CanonicalTerm<TypeSystem>),
     ChurchNumeral(num_bigint::BigUint),
 }
 
-impl Modifier {
-    fn from_parsed(parsed: ParsedModifier) -> Option<Modifier> {
+impl<TypeSystem> Modifier<TypeSystem>
+where
+    TypeSystem: IsTypeSystem,
+{
+    fn from_parsed(parsed: ParsedModifier<TypeSystem>) -> Option<Modifier<TypeSystem>> {
         match parsed.name.as_str() {
             "subst" => {
                 if parsed.args.len() != 3 {
@@ -376,7 +475,7 @@ impl Modifier {
         }
     }
 
-    fn apply(self) -> CanonicalTerm {
+    fn apply(self) -> CanonicalTerm<TypeSystem> {
         match self {
             Self::Subst(name, substituted, mut term) => {
                 term.substitute(&name, &substituted);
@@ -393,4 +492,8 @@ impl Modifier {
             Self::ChurchNumeral(value) => CanonicalTerm::create_church_numeral(value),
         }
     }
+}
+
+pub trait Parse: Sized {
+    fn parse(parser: Parser) -> Result<(Parser, Self), ParseError>;
 }

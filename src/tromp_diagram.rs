@@ -1,3 +1,4 @@
+/*
 use std::{
     fmt::Display,
     ops::{Index, IndexMut},
@@ -56,3 +57,4 @@ impl IndexMut<(usize, usize)> for TrompDiagram {
         &mut self.cells[idx]
     }
 }
+*/
