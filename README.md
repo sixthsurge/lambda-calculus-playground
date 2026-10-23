@@ -4,6 +4,17 @@ no LLMs were used for this project (for research or programming).
 
 ### usage
 
+There are two modes: `untyped` and `stlc` (simply typed lamda calculus). The default
+mode is `untyped`. Select the mode by passing `--mode=...`.
+
+The `untyped` mode has one type, `Everything`, which is the type of everything.
+The types in the `stlc` mode are `Int` and `(A -> B)` where `A` and `B` are types.
+Additionally the stlc mode has the following constants:
+- Any positive integer or 0
+- The built-in functions add, sub, mul and div
+  - div a 0 returns 0
+
+Conventions:
 - write lambda terms according to the following conventions:
   - `\` is used for lambda as it's easier to type
   - application binds closer than abstraction, so `\a.b c` is parsed as `\a.(b c)`, not `(\a.b) c`
