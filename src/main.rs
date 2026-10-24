@@ -400,4 +400,38 @@ mod tests {
             Some(BigUint::from(12u32))
         );
     }
+
+    #[test]
+    fn stlc_factorial() {
+        let mut playground =
+            LambdaPlayground::<SimplyTypedLambdaCalculus>::new(Mode::SimplyTyped, false, 1024);
+
+        playground
+            .process_string(
+                r#"
+                fac = fix (\s: (Int -> Int) n: Int. if n (mul n (s (sub n 1))) 1)
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            playground.process("fac 1".parse().unwrap()),
+            "1".parse().unwrap()
+        );
+        assert_eq!(
+            playground.process("fac 2".parse().unwrap()),
+            "2".parse().unwrap()
+        );
+        assert_eq!(
+            playground.process("fac 3".parse().unwrap()),
+            "6".parse().unwrap()
+        );
+        assert_eq!(
+            playground.process("fac 4".parse().unwrap()),
+            "24".parse().unwrap()
+        );
+        assert_eq!(
+            playground.process("fac (fac 4)".parse().unwrap()),
+            "620448401733239439360000".parse().unwrap()
+        );
+    }
 }

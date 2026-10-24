@@ -265,6 +265,12 @@ pub enum SimpleType {
     Fix,
 }
 
+impl SimpleType {
+    pub fn func(a: Self, b: Self) -> Self {
+        Self::Function(Box::new(a), Box::new(b))
+    }
+}
+
 impl IsType<SimplyTypedLambdaCalculus> for SimpleType {}
 
 impl Display for SimpleType {
@@ -384,7 +390,7 @@ impl Parse for SimpleConstant {
     }
 }
 
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SimpleTypeError {
     #[error("variable '{0}' is unbound")]
     UnboundVariable(Name),
@@ -394,4 +400,62 @@ pub enum SimpleTypeError {
     MissingTypeForBinding(Name),
     #[error("cannot apply 'fix' to '{0}'")]
     BadFix(SimpleType),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{term_representation::CanonicalTerm, type_system::SimpleTypeError::{BadApplication, BadFix, MissingTypeForBinding, UnboundVariable}};
+
+    use super::*;
+
+    #[test]
+    fn stlc_typecheck() {
+        use SimpleType::*;
+        let f = SimpleType::func;
+
+        let test_cases = [
+            (r#" a "#, Err(UnboundVariable("a".into()))),
+            (r#" 0 "#, Ok(Int)),
+            (r#" 0 1 "#, Err(BadApplication(Int, Int))),
+            (r#" \x.0 "#, Err(MissingTypeForBinding("x".into()))),
+            (r#" \x:Int.0 "#, Ok(f(Int, Int))),
+            (r#" \x:Int.x "#, Ok(f(Int, Int))),
+            (r#" (\x:Int.x) 0 "#, Ok(Int)),
+            (r#" if "#, Ok(f(Int, f(Int, f(Int, Int))))),
+            (r#" add "#, Ok(f(Int, f(Int, Int)))),
+            (r#" sub "#, Ok(f(Int, f(Int, Int)))),
+            (r#" mul "#, Ok(f(Int, f(Int, Int)))),
+            (r#" div "#, Ok(f(Int, f(Int, Int)))),
+            (r#" fix (\x:Int.x) "#, Ok(Int)),
+            (r#" fix 0 "#, Err(BadFix(Int))),
+            (r#" fix "#, Ok(Fix)),
+        ];
+
+        for (term, expected_result) in test_cases.into_iter() {
+            let term: CanonicalTerm<SimplyTypedLambdaCalculus> = term.parse().unwrap();
+            let result = SimplyTypedLambdaCalculus::typecheck(&term, &TypingContext::new());
+            assert_eq!(result, expected_result);
+        }
+    }
+
+    #[test]
+    fn stlc_const_eval() {
+        let test_cases = [
+            (r#" if 0 1 2"#, r#" 2 "#),
+            (r#" if 1 1 2"#, r#" 1 "#),
+            (r#" if 3 1 2"#, r#" 1 "#),
+            (r#" add 2 3 "#, r#" 5 "#),
+            (r#" sub 8 3 "#, r#" 5 "#),
+            (r#" mul 8 2 "#, r#" 16 "#),
+            (r#" div 8 2 "#, r#" 4 "#),
+            (r#" fix (\x: Int.0) "#, r#" (\x: Int.0) (fix (\x: Int. 0)) "#),
+        ];
+
+        for (input, expected) in test_cases {
+            let input: CanonicalTerm<SimplyTypedLambdaCalculus> = input.parse().unwrap();
+            let expected: CanonicalTerm<SimplyTypedLambdaCalculus> = expected.parse().unwrap();
+            let result = SimplyTypedLambdaCalculus::try_eval_const(&input).unwrap();
+            assert_eq!(expected, result);
+        }
+    }       
 }
