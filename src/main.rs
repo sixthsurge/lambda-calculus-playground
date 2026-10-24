@@ -59,6 +59,8 @@ struct Args {
     mode: Mode,
     #[arg(long, default_value_t = false)]
     print_intermediate: bool,
+    #[arg(long, default_value_t = -1)]
+    stop_after: i64,
 }
 
 #[derive(Debug)]
@@ -70,18 +72,20 @@ where
     dictionary: Vec<(String, CanonicalTerm<TypeSystem>)>,
     terminate: bool,
     print_intermediate: bool,
+    stop_after: i64,
 }
 
 impl<TypeSystem> LambdaPlayground<TypeSystem>
 where
     TypeSystem: IsTypeSystem,
 {
-    fn new(mode: Mode, print_intermediate: bool) -> Self {
+    fn new(mode: Mode, print_intermediate: bool, stop_after: i64) -> Self {
         Self {
             mode,
             dictionary: vec![],
             terminate: false,
             print_intermediate,
+            stop_after,
         }
     }
 
@@ -123,7 +127,7 @@ where
 
     fn process_line(&mut self, mut remaining: &str, interactive: bool) -> anyhow::Result<()> {
         // The line has the form:
-        // (identifier :=) term
+        // (identifier =) term
         // OR
         // ! command
 
@@ -191,7 +195,7 @@ where
         }
 
         let mut identifier = None;
-        if let Some((before, after)) = remaining.split_once(":=") {
+        if let Some((before, after)) = remaining.split_once("=") {
             identifier = Some(before.trim());
             remaining = after.trim();
         }
@@ -224,7 +228,7 @@ where
             }
             */
 
-            match TypeSystem::typecheck(&term, &TypingContext::<TypeSystem>::new()) {
+            match TypeSystem::typecheck(&expanded, &TypingContext::<TypeSystem>::new()) {
                 Ok(ty) => cprintln!("Type: <yellow>{ty}</>"),
                 Err(e) => {
                     cprintln!("<red>Type error</>: {e}");
@@ -233,7 +237,10 @@ where
             }
 
             let mut reduced = expanded.clone();
-            loop {
+            for iter in 0.. {
+                if iter >= self.stop_after && self.stop_after > 0 {
+                    break;
+                }
                 if self.print_intermediate {
                     println!("=> {reduced}");
                 }
@@ -303,12 +310,20 @@ fn main() -> anyhow::Result<()> {
 
     match args.mode {
         Mode::Untyped => {
-            LambdaPlayground::<UntypedLambdaCalculus>::new(args.mode, args.print_intermediate)
-                .run_repl()?;
+            LambdaPlayground::<UntypedLambdaCalculus>::new(
+                args.mode,
+                args.print_intermediate,
+                args.stop_after,
+            )
+            .run_repl()?;
         }
         Mode::SimplyTyped => {
-            LambdaPlayground::<SimplyTypedLambdaCalculus>::new(args.mode, args.print_intermediate)
-                .run_repl()?;
+            LambdaPlayground::<SimplyTypedLambdaCalculus>::new(
+                args.mode,
+                args.print_intermediate,
+                args.stop_after,
+            )
+            .run_repl()?;
         }
     }
 
@@ -323,20 +338,21 @@ mod tests {
 
     #[test]
     fn church_numeral_arithmetic() {
-        let mut playground = LambdaPlayground::<UntypedLambdaCalculus>::new(Mode::Untyped, false);
+        let mut playground =
+            LambdaPlayground::<UntypedLambdaCalculus>::new(Mode::Untyped, false, -1);
 
         playground
             .process_string(
                 r#"
-                succ := \n f x. f (n f x)
-                pred := \n f x. n (\g. \h. h (g f)) (\u. x) (\u. u)
-                add := \m n f x. m f (n f x)
-                sub := \m n. n pred m
-                mul := \m n. m (add n) cnum!(0)
-                pow := \base power. power base
-                iszero := \n. n (\x. F) T
-                leq := \m n. iszero (sub m n)
-                eq := \m n. and (leq m n) (leq n m)
+                succ = \n f x. f (n f x)
+                pred = \n f x. n (\g. \h. h (g f)) (\u. x) (\u. u)
+                add = \m n f x. m f (n f x)
+                sub = \m n. n pred m
+                mul = \m n. m (add n) cnum!(0)
+                pow = \base power. power base
+                iszero = \n. n (\x. F) T
+                leq = \m n. iszero (sub m n)
+                eq = \m n. and (leq m n) (leq n m)
                 "#,
             )
             .unwrap();

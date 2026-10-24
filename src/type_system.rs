@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fmt::{write, Debug, Display},
+    fmt::{Debug, Display, write},
     str::FromStr,
 };
 
@@ -161,6 +161,15 @@ impl IsTypeSystem for SimplyTypedLambdaCalculus {
 
             match &m_ty {
                 SimpleType::Function(a, b) if a.as_ref() == &n_ty => Ok(b.as_ref().clone()),
+                SimpleType::Fix => {
+                    if let SimpleType::Function(a, b) = &n_ty
+                        && a == b
+                    {
+                        Ok(a.as_ref().clone())
+                    } else {
+                        Err(SimpleTypeError::BadFix(n_ty.clone()))
+                    }
+                }
                 _ => Err(SimpleTypeError::BadApplication(m_ty, n_ty)),
             }
         } else if let Some((arg, body, ty)) = term.as_abstraction() {
@@ -184,28 +193,68 @@ impl IsTypeSystem for SimplyTypedLambdaCalculus {
     where
         Term: TermRepresentation<Self>,
     {
-        let Some((f, y)) = term.as_application() else {
-            return None;
+        let eval_fix = |term: &Term| {
+            let Some((f, y)) = term.as_application() else {
+                return None;
+            };
+
+            // Fixed-point combinator `fix g -> g (fix g)`.
+            if f.as_constant() == Some(&SimpleConstant::Fix) {
+                return Some(Term::make_application(y.clone(), term.clone()));
+            }
+            None
         };
-        let Some(SimpleConstant::Int(y)) = y.as_constant() else {
-            return None;
+        let eval_if = |term: &Term| {
+            let Some((f, z)) = term.as_application() else {
+                return None;
+            };
+            let Some((f, y)) = f.as_application() else {
+                return None;
+            };
+            let Some((f, x)) = f.as_application() else {
+                return None;
+            };
+            let Some(SimpleConstant::Int(x)) = x.as_constant() else {
+                return None;
+            };
+
+            match f.as_constant() {
+                Some(SimpleConstant::If) => Some(if x > &BigInt::ZERO {
+                    y.clone()
+                } else {
+                    z.clone()
+                }),
+                _ => None,
+            }
         };
-        let Some((f, x)) = f.as_application() else {
-            return None;
-        };
-        let Some(SimpleConstant::Int(x)) = x.as_constant() else {
-            return None;
+        let eval_binary = |term: &Term| {
+            let Some((f, y)) = term.as_application() else {
+                return None;
+            };
+            let Some(SimpleConstant::Int(y)) = y.as_constant() else {
+                return None;
+            };
+            let Some((f, x)) = f.as_application() else {
+                return None;
+            };
+            let Some(SimpleConstant::Int(x)) = x.as_constant() else {
+                return None;
+            };
+
+            match f.as_constant() {
+                Some(SimpleConstant::IAdd) => Some(Term::make_constant(SimpleConstant::Int(x + y))),
+                Some(SimpleConstant::ISub) => Some(Term::make_constant(SimpleConstant::Int(x - y))),
+                Some(SimpleConstant::IMul) => Some(Term::make_constant(SimpleConstant::Int(x * y))),
+                Some(SimpleConstant::IDiv) => Some(Term::make_constant(SimpleConstant::Int(
+                    x.checked_div(y).unwrap_or(BigInt::ZERO),
+                ))),
+                _ => None,
+            }
         };
 
-        match f.as_constant() {
-            Some(SimpleConstant::IAdd) => Some(Term::make_constant(SimpleConstant::Int(x + y))),
-            Some(SimpleConstant::IDiv) => Some(Term::make_constant(SimpleConstant::Int(x - y))),
-            Some(SimpleConstant::IMul) => Some(Term::make_constant(SimpleConstant::Int(x * y))),
-            Some(SimpleConstant::ISub) => Some(Term::make_constant(SimpleConstant::Int(
-                x.checked_div(y).unwrap_or(BigInt::ZERO),
-            ))),
-            _ => None,
-        }
+        None.or_else(|| eval_binary(term))
+            .or_else(|| eval_if(term))
+            .or_else(|| eval_fix(term))
     }
 }
 
@@ -213,6 +262,7 @@ impl IsTypeSystem for SimplyTypedLambdaCalculus {
 pub enum SimpleType {
     Int,
     Function(Box<SimpleType>, Box<SimpleType>),
+    Fix,
 }
 
 impl IsType<SimplyTypedLambdaCalculus> for SimpleType {}
@@ -222,6 +272,7 @@ impl Display for SimpleType {
         match self {
             Self::Int => write!(f, "Int"),
             Self::Function(a, b) => write!(f, "({a} -> {b})"),
+            Self::Fix => write!(f, "Fix"),
         }
     }
 }
@@ -252,6 +303,8 @@ impl Parse for SimpleType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimpleConstant {
     Int(BigInt),
+    Fix,
+    If,
     IAdd,
     ISub,
     IMul,
@@ -262,6 +315,17 @@ impl IsConstant<SimplyTypedLambdaCalculus> for SimpleConstant {
     fn ty(&self) -> <SimplyTypedLambdaCalculus as IsTypeSystem>::Type {
         match self {
             Self::Int(_) => SimpleType::Int,
+            Self::Fix => SimpleType::Fix,
+            Self::If => SimpleType::Function(
+                Box::new(SimpleType::Int),
+                Box::new(SimpleType::Function(
+                    Box::new(SimpleType::Int),
+                    Box::new(SimpleType::Function(
+                        Box::new(SimpleType::Int),
+                        Box::new(SimpleType::Int),
+                    )),
+                )),
+            ),
             Self::IAdd | Self::ISub | Self::IMul | Self::IDiv => SimpleType::Function(
                 Box::new(SimpleType::Int),
                 Box::new(SimpleType::Function(
@@ -277,6 +341,8 @@ impl Display for SimpleConstant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Int(x) => write!(f, "{x}"),
+            Self::Fix => write!(f, "fix"),
+            Self::If => write!(f, "if"),
             Self::IAdd => write!(f, "add"),
             Self::ISub => write!(f, "sub"),
             Self::IMul => write!(f, "mul"),
@@ -299,8 +365,10 @@ impl Parse for SimpleConstant {
         }?;
 
         let result = match name.as_str() {
+            "fix" => Self::Fix,
+            "if" => Self::If,
             "add" => Self::IAdd,
-            "sub" => Self::IDiv,
+            "sub" => Self::ISub,
             "mul" => Self::IMul,
             "div" => Self::IDiv,
             s => {
@@ -324,4 +392,6 @@ pub enum SimpleTypeError {
     BadApplication(SimpleType, SimpleType),
     #[error("missing type in binding for '{0}'")]
     MissingTypeForBinding(Name),
+    #[error("cannot apply 'fix' to '{0}'")]
+    BadFix(SimpleType),
 }

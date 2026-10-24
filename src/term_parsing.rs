@@ -104,7 +104,11 @@ impl<'source> Lexer<'source> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.chars.peek().is_some_and(|&c| c.is_whitespace() || c == '_') {
+        while self
+            .chars
+            .peek()
+            .is_some_and(|&c| c.is_whitespace() || c == '_')
+        {
             self.chars.next();
         }
     }

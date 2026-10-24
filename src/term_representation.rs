@@ -16,6 +16,7 @@ where
 {
     type VariableId: Clone + Eq + PartialEq + std::hash::Hash;
 
+    fn make_application(m: Self, n: Self) -> Self;
     fn make_constant(c: TypeSystem::Constant) -> Self;
 
     /// Capture-avoiding substitution `self <- {N/x} self`.
@@ -146,6 +147,10 @@ where
     TypeSystem: IsTypeSystem,
 {
     type VariableId = Name;
+
+    fn make_application(m: Self, n: Self) -> Self {
+        Self::Application(Box::new(m), Box::new(n))
+    }
 
     fn make_constant(c: TypeSystem::Constant) -> Self {
         Self::Constant(c)

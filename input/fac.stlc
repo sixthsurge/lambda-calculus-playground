@@ -1,0 +1,3 @@
+!req stlc
+
+fac = fix (\s: (Int -> Int) n: Int. if n (mul n (s (sub n 1))) 1)

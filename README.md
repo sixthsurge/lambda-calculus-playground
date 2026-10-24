@@ -4,15 +4,27 @@ no LLMs were used for this project (for research or programming).
 
 ### usage
 
-There are two modes: `untyped` and `stlc` (simply typed lamda calculus). The default
+There are two modes: `untyped`, the untyped lambda calculus, and `stlc`, which is a simply typed 
+lamda calculus extended with a fixed-point combinator. The default 
 mode is `untyped`. Select the mode by passing `--mode=...`.
 
-The `untyped` mode has one type, `Everything`, which is the type of everything.
-The types in the `stlc` mode are `Int` and `(A -> B)` where `A` and `B` are types.
-Additionally the stlc mode has the following constants:
-- Any positive integer or 0
-- The built-in functions add, sub, mul and div
-  - div a 0 returns 0
+The `untyped` mode has one type, `Everything`, which is the type of everything, and no constants.
+
+The `stlc` mode has the following types:
+- `Int`
+- `A -> B` where `A` and `B` are types
+- `Fix` - the type of the fixed-point combinator (this models `forall a. (a -> a) -> a`).
+...and the following constants:
+- Numerals `0`, `1`, `2`, etc.
+- Selection function `if`.
+  - `if` follows the convention that zero is false.
+- Built-in arithmetic functions
+  - `add`
+  - `sub`
+  - `mul`
+  - `div`
+    - `div a 0` returns `0`.
+- The fixed-point combinator `fix`.
 
 Conventions:
 - write lambda terms according to the following conventions:
